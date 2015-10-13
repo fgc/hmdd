@@ -11,6 +11,9 @@
 #include <dwarf.h>
 #include <libdwarf.h>
 
+
+#define MAX_ERR_MSG_LEN 255
+
 struct State {
   Display* display;
   int screen;
@@ -18,52 +21,82 @@ struct State {
   GC gc;
   XFontStruct* font_info;
   char* program_name;
+  int at_y;
+  Dwarf_Debug dbg;
+  Dwarf_Error err;
+  int result;
 };
 
 
-int find_line_info(Dwarf_Debug dwarf_debug, Dwarf_Die in_die, Dwarf_Die* out_die) {
-  Dwarf_Die child = 0;
-  Dwarf_Die current_die = in_die;
-  Dwarf_Error dwerror;
-  int result = 0;
-  
-  for(;;) {
-    Dwarf_Die sibling = 0;
-    char* name = 0;
-    dwarf_diename(current_die, &name, &dwerror);
-    printf("Current_die: %s ", name);
-    dwarf_dealloc(dwarf_debug, name, DW_DLA_STRING);
-    result = dwarf_child(current_die, &child, &dwerror);
-    if (result == DW_DLV_ERROR) {
-      fprintf(stderr, "Error: dwarf_child\n");
-      return DW_DLV_ERROR;
+void put_string(State* state, const char* buffer, int length) {
+  XDrawString(state->display, state->window, state->gc, 10, state->at_y, buffer, length);
+  state->at_y += 15;
+}
+
+void print_error(State* state, const char * msg, bool print_ok = false) {
+  int msg_len = 0;
+  char buffer[MAX_ERR_MSG_LEN];
+  if (state->result == DW_DLV_OK) {
+    if (!print_ok) {
+      return;
     }
+    msg_len = snprintf(buffer, MAX_ERR_MSG_LEN, "%s: OK %s", state->program_name, msg);
+  } else if (state->result == DW_DLV_ERROR) {
+    char* errmsg = dwarf_errmsg(state->err);
+    Dwarf_Unsigned errno = dwarf_errno(state->err);
+    msg_len = snprintf(buffer, MAX_ERR_MSG_LEN, "%s ERROR %s: %s (%lu)",
+                       state->program_name, msg, errmsg, (unsigned long)errno);
+  } else if (state->result == DW_DLV_NO_ENTRY) {
+    msg_len = snprintf(buffer, MAX_ERR_MSG_LEN, "%s NO ENTRY %s", state->program_name, msg);
+  } else {
+    msg_len = snprintf(buffer, MAX_ERR_MSG_LEN, "%s InternalError:  %s: code %d",
+                       state->program_name, msg, state->result);
+  }
+  put_string(state, buffer, msg_len);
+}
 
-    if (result == DW_DLV_OK) {
-      printf("\n");
-      return find_line_info(dwarf_debug, child, NULL);
-    }
+void print_line_info(State* state, Dwarf_Die cu_die) {
+  char header[] = ".debug_line: line number info for a single cu";
+  put_string(state, header, sizeof(header) - 1);
+  put_string(state, "Hello2", 6);
 
-    result = dwarf_siblingof(dwarf_debug, current_die, &sibling, &dwerror);
+  Dwarf_Line* line_buffer;
+  Dwarf_Signed line_count;
+  Dwarf_Addr line_addr;
+  Dwarf_Unsigned line_number;
 
-    if (result == DW_DLV_ERROR) {
-      fprintf(stderr, "Error: dwarf_sibling\n");
-      return DW_DLV_ERROR;
-    }
+  state->result = dwarf_srclines(cu_die, &line_buffer, &line_count, &state->err);
+  if (state->result == DW_DLV_ERROR) {
+    print_error(state, "dwarf_srclines");
+  } else if (state->result == DW_DLV_NO_ENTRY) {
+    printf("\nNOOOOOOOOO\n");
+  }
+  char lines_sg[MAX_ERR_MSG_LEN]; 
+  int msg_size = snprintf(lines_sg, MAX_ERR_MSG_LEN, "Got line info for %lli lines", line_count);
+  put_string(state, lines_sg, msg_size);
 
-    if(result == DW_DLV_NO_ENTRY) {
-      printf("\n");
-      break;
-    }
+  for (Dwarf_Signed i = 0;
+       i < line_count;
+       ++i) {
+    Dwarf_Line line = line_buffer[i];
 
-    if (current_die != in_die) {
-      dwarf_dealloc(dwarf_debug, current_die, DW_DLA_DIE);
-    }
+    char* filename = 0;
+    state->result = dwarf_linesrc(line, &filename, &state->err);
+    print_error(state, "dwarf_linesrc");
 
-    current_die = sibling;
+    state->result = dwarf_lineaddr(line, &line_addr, &state->err);
+    print_error(state, "dwarf_lineaddr");
+
+    state->result = dwarf_lineno(line, &line_number, &state->err);
+    print_error(state, "dwarf_lineno");
+
+    char line_info[MAX_ERR_MSG_LEN];
+    int info_size = snprintf(line_info, MAX_ERR_MSG_LEN,  "0x%" DW_PR_XZEROS DW_PR_DUx " [%4" DW_PR_DUu "]", line_addr, line_number);
+    put_string(state, line_info, info_size);
+
   }
 
-  return DW_DLV_NO_ENTRY;
+  dwarf_srclines_dealloc(state->dbg, line_buffer, line_count);
 }
 
 void run_debugger(State* state, pid_t pid) {
@@ -74,11 +107,10 @@ void run_debugger(State* state, pid_t pid) {
     exit(-1);
   }
 
-  Dwarf_Debug dwarf_debug = 0;
   Dwarf_Error dwarf_error;
   Dwarf_Handler error_handler = 0;
   Dwarf_Ptr error_argument = 0;
-  int init_result = dwarf_init(handle, DW_DLC_READ, error_handler, error_argument, &dwarf_debug, &dwarf_error);
+  int init_result = dwarf_init(handle, DW_DLC_READ, error_handler, error_argument, &state->dbg, &dwarf_error);
   if (init_result != DW_DLV_OK) {
     fprintf(stderr, "Could not init DWARF\n");
     exit(-1);
@@ -90,7 +122,7 @@ void run_debugger(State* state, pid_t pid) {
   Dwarf_Half address_size = 0;
   Dwarf_Unsigned next_cu_header = 0;
 
-  int result = dwarf_next_cu_header(dwarf_debug
+  int result = dwarf_next_cu_header(state->dbg
                                     , &cu_header_length
                                     , &version_stamp
                                     , &abbrev_offset
@@ -101,7 +133,7 @@ void run_debugger(State* state, pid_t pid) {
   printf("1st CU header: length(%llu), version(%d), next(%llu)\n", cu_header_length, version_stamp, next_cu_header);
 
   Dwarf_Die prev_die, die;
-  if (dwarf_siblingof(dwarf_debug, NULL, &die, &dwarf_error) != DW_DLV_OK) {
+  if (dwarf_siblingof(state->dbg, NULL, &die, &dwarf_error) != DW_DLV_OK) {
     fprintf(stderr, "Can't get sibling\n");
     return;
   }
@@ -110,11 +142,14 @@ void run_debugger(State* state, pid_t pid) {
   Dwarf_Half tag = 0;
   dwarf_tag(die, &tag, &dwarf_error);
   printf("CU Die: name (%s), tag (%d)\n", name, tag);
-
+  print_line_info(state, die);
+#if 0
   Dwarf_Line* linebuf;
   Dwarf_Signed linecount;
   result = dwarf_srclines(die, &linebuf, &linecount, &dwarf_error);
-  printf("Got line info for %lli lines\n", linecount);
+printf("Got line info for %lli lines\n", linecount);
+
+
   for (Dwarf_Signed i = 0;
        i < linecount;
        ++i) {
@@ -124,10 +159,12 @@ void run_debugger(State* state, pid_t pid) {
     if (has_addr) {
       Dwarf_Addr addr = 0;
       dwarf_lineaddr(*line, &addr, &dwarf_error);
-      printf("(%lli) -> %llu\n", i, addr);
+      printf("(%lli) -> 0x%llx\n", i, addr);
     }
   }
-#if 0
+
+  dwarf_srclines_dealloc(state->dbg, linebuf, linecount);
+
   Dwarf_Attribute line_info_ref = 0;
 
   result = dwarf_attr(die, DW_AT_stmt_list, &line_info_ref, &dwarf_error);
@@ -142,7 +179,7 @@ void run_debugger(State* state, pid_t pid) {
 
   Dwarf_Addr line_info_addr = 0;
   Dwarf_Unsigned line_info_size = 0;
-  result = dwarf_get_section_info_by_name(dwarf_debug, ".debug_line", &line_info_addr, &line_info_size, &dwarf_error);
+  result = dwarf_get_section_info_by_name(state->dbg, ".debug_line", &line_info_addr, &line_info_size, &dwarf_error);
   if (result != DW_DLV_OK) {
     printf("Error: No line section info\n");
   } else {
@@ -164,16 +201,16 @@ void run_debugger(State* state, pid_t pid) {
     wait(&wait_status);
   }
 
-  XFillRectangle(state->display, state->window, state->gc, 100, 100, 150, 150);
+  //XFillRectangle(state->display, state->window, state->gc, 100, 100, 150, 150);
 
   char buffer[100];
   int length = snprintf(buffer, 100, "Executed: %d instructions", icounter);
   XDrawString(state->display, state->window, state->gc, 300, 300, buffer, length);
 
   XFlush(state->display);
-  sleep(2);
+  sleep(5);
   XCloseDisplay(state->display);
-  init_result = dwarf_finish(dwarf_debug, &dwarf_error);
+  init_result = dwarf_finish(state->dbg, &dwarf_error);
   if (init_result != DW_DLV_OK) {
     fprintf(stderr, "Could not finish DWARF\n");
     exit(-1);
@@ -193,6 +230,8 @@ void run_debug_target(char* program_name) {
 int main (int argc, char** argv) {
 
   State state = {};
+
+  state.at_y = 15;
 
   if (argc < 2) {
     fprintf(stderr, "Missing program name to debug\n");
