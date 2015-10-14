@@ -14,6 +14,13 @@
 
 #define MAX_ERR_MSG_LEN 255
 
+struct Line {
+  unsigned long offset;
+  unsigned long length;
+  Dwarf_Addr address;
+};
+
+
 struct State {
 Display* display;
   int screen;
@@ -23,7 +30,7 @@ Display* display;
   XColor highlight;
   char* program_name;
   char* source_buffer;
-  unsigned long*  line_buffer;
+  Line* lines;
   int at_y;
   Dwarf_Debug dbg;
   Dwarf_Error err;
@@ -31,9 +38,11 @@ Display* display;
 };
 
 
+
 void put_string(State* state, const char* buffer, int length) {
   XDrawString(state->display, state->window, state->gc, 10, state->at_y, buffer, length);
   state->at_y += 15;
+  XFlush(state->display);
 }
 
 void print_error(State* state, const char * msg, bool print_ok = false) {
@@ -63,8 +72,13 @@ inline void print_line(State* state, unsigned long line_number, bool highlight =
   if (highlight) {
     XSetForeground(state->display, state->gc, state->highlight.pixel);
   }
-  put_string(state, state->source_buffer + state->line_buffer[line_number],
-             state->line_buffer[line_number + 1] - state->line_buffer[line_number] - 1);
+  unsigned int offset = state->source_buffer + state->lines[line_number].offset;
+  char line[MAX_LINE_LENGTH];
+  int length = snprintf(line, MAX_LINE_LENGTH,
+                        "0x%" DW_PR_XZEROS DW_PR_DUx  " : %s",)
+  we are here
+  put_string(state, line,
+             state->lines[line_number].length);
   if (highlight) {
     XSetForeground(state->display, state->gc, WhitePixel(state->display, state->screen));
   }
@@ -78,7 +92,7 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
   Dwarf_Line* line_buffer;
   Dwarf_Signed line_count;
   Dwarf_Addr line_addr;
-  Dwarf_Unsigned line_number;
+  Dwarf_Unsigned dwarf_line_number;
 
   state->result = dwarf_srclines(cu_die, &line_buffer, &line_count, &state->err);
   if (state->result == DW_DLV_ERROR) {
@@ -106,24 +120,30 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
       unsigned long length = st.st_size;
       state->source_buffer = (char *) malloc(length * sizeof(char));
       // TODO: this is obviously too big
-      state->line_buffer = (unsigned long *)malloc(length * sizeof(unsigned long));
+      state->lines = (Line *)malloc(length * sizeof(Line));
       int handle = open(filename, O_RDONLY);
       read(handle, state->source_buffer, length);
-      unsigned long line_number = 1;
-      state->line_buffer[0] = 0;
+      unsigned long line_number = 0;
+      state->lines[0].offset = 0;
       for (unsigned long i = 0;
            i < length;) {
         char firstchar = state->source_buffer[i++];
         char secondchar = state->source_buffer[i];
         if (firstchar == '\r' && secondchar == '\n') {
-          state->line_buffer[line_number++] = ++i;
+          //TODO: \r\n handling is untested
+          state->lines[line_number].address = 0;
+          state->lines[line_number].length = i - state->lines[line_number].offset - 2;
+          state->lines[line_number++].offset = ++i;
           continue;
         }
         if (firstchar == '\n') {
-          state->line_buffer[line_number++] = i;
+          state->lines[line_number].address = 0;
+          state->lines[line_number].length = i - state->lines[line_number].offset - 1;
+          state->lines[++line_number].offset = i;
         }
       }
-      state->line_buffer[line_number] = length;
+      state->lines[line_number].address = 0;
+      state->lines[line_number].length = length - state->lines[line_number].offset;
       print_line(state, 0);
       print_line(state, 1);
       print_line(state, 2);
@@ -140,8 +160,12 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
     state->result = dwarf_lineaddr(line, &line_addr, &state->err);
     print_error(state, "dwarf_lineaddr");
 
-    state->result = dwarf_lineno(line, &line_number, &state->err);
+    state->result = dwarf_lineno(line, &dwarf_line_number, &state->err);
     print_error(state, "dwarf_lineno");
+
+    if (state->lines[dwarf_line_number].address == 0) {
+      state->lines[dwarf_line_number].address = line_addr;
+    }
 
     char line_info[MAX_ERR_MSG_LEN];
     int info_size = snprintf(line_info, MAX_ERR_MSG_LEN,  "0x%" DW_PR_XZEROS DW_PR_DUx " [%4" DW_PR_DUu "]", line_addr, line_number);
