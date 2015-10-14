@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <sys/types.h> /* For open() */
-#include <sys/stat.h>  /* For open() */
+#include <sys/stat.h>  /* open, stat */
 #include <fcntl.h>     /* For open() */
 #include <stdlib.h>     /* For exit() */
 #include <assert.h>
@@ -15,12 +15,15 @@
 #define MAX_ERR_MSG_LEN 255
 
 struct State {
-  Display* display;
+Display* display;
   int screen;
   Window window;
   GC gc;
   XFontStruct* font_info;
+  XColor highlight;
   char* program_name;
+  char* source_buffer;
+  unsigned long*  line_buffer;
   int at_y;
   Dwarf_Debug dbg;
   Dwarf_Error err;
@@ -55,6 +58,18 @@ void print_error(State* state, const char * msg, bool print_ok = false) {
   put_string(state, buffer, msg_len);
 }
 
+
+inline void print_line(State* state, unsigned long line_number, bool highlight = false) {
+  if (highlight) {
+    XSetForeground(state->display, state->gc, state->highlight.pixel);
+  }
+  put_string(state, state->source_buffer + state->line_buffer[line_number],
+             state->line_buffer[line_number + 1] - state->line_buffer[line_number] - 1);
+  if (highlight) {
+    XSetForeground(state->display, state->gc, WhitePixel(state->display, state->screen));
+  }
+}
+
 void print_line_info(State* state, Dwarf_Die cu_die) {
   char header[] = ".debug_line: line number info for a single cu";
   put_string(state, header, sizeof(header) - 1);
@@ -71,18 +86,56 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
   } else if (state->result == DW_DLV_NO_ENTRY) {
     printf("\nNOOOOOOOOO\n");
   }
-  char lines_sg[MAX_ERR_MSG_LEN]; 
+  char lines_sg[MAX_ERR_MSG_LEN];
   int msg_size = snprintf(lines_sg, MAX_ERR_MSG_LEN, "Got line info for %lli lines", line_count);
   put_string(state, lines_sg, msg_size);
+
+  char* filename = 0;
 
   for (Dwarf_Signed i = 0;
        i < line_count;
        ++i) {
+
     Dwarf_Line line = line_buffer[i];
 
-    char* filename = 0;
-    state->result = dwarf_linesrc(line, &filename, &state->err);
-    print_error(state, "dwarf_linesrc");
+    if (filename == 0) {
+      state->result = dwarf_linesrc(line, &filename, &state->err);
+      print_error(state, "dwarf_linesrc");
+      struct stat st;
+      stat(filename, &st);
+      unsigned long length = st.st_size;
+      state->source_buffer = (char *) malloc(length * sizeof(char));
+      // TODO: this is obviously too big
+      state->line_buffer = (unsigned long *)malloc(length * sizeof(unsigned long));
+      int handle = open(filename, O_RDONLY);
+      read(handle, state->source_buffer, length);
+      unsigned long line_number = 1;
+      state->line_buffer[0] = 0;
+      for (unsigned long i = 0;
+           i < length;) {
+        char firstchar = state->source_buffer[i++];
+        char secondchar = state->source_buffer[i];
+        if (firstchar == '\r' && secondchar == '\n') {
+          state->line_buffer[line_number++] = ++i;
+          continue;
+        }
+        if (firstchar == '\n') {
+          state->line_buffer[line_number++] = i;
+        }
+      }
+      state->line_buffer[line_number] = length;
+      print_line(state, 0);
+      print_line(state, 1);
+      print_line(state, 2);
+      print_line(state, 3);
+      print_line(state, 4);
+      print_line(state, 5);
+      print_line(state, 6, true);
+      print_line(state, 7);
+      print_line(state, 8);
+      print_line(state, 9);
+      print_line(state, 10);
+    }
 
     state->result = dwarf_lineaddr(line, &line_addr, &state->err);
     print_error(state, "dwarf_lineaddr");
@@ -208,7 +261,7 @@ printf("Got line info for %lli lines\n", linecount);
   XDrawString(state->display, state->window, state->gc, 300, 300, buffer, length);
 
   XFlush(state->display);
-  sleep(5);
+  sleep(10);
   XCloseDisplay(state->display);
   init_result = dwarf_finish(state->dbg, &dwarf_error);
   if (init_result != DW_DLV_OK) {
@@ -279,6 +332,11 @@ int main (int argc, char** argv) {
   state.font_info = XLoadQueryFont(state.display, font_name);
   assert(state.font_info);
   XSetFont(state.display, state.gc, state.font_info->fid);
+
+  Colormap colormap = DefaultColormap(state.display, 0);
+  const char* yellow="#FFFF00";
+  XParseColor(state.display, colormap, yellow, &state.highlight);
+  XAllocColor(state.display, colormap, &state.highlight);
 
   XSetForeground(state.display, state.gc, WhitePixel(state.display, state.screen));
 
