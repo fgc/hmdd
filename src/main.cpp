@@ -13,6 +13,7 @@
 
 
 #define MAX_ERR_MSG_LEN 255
+#define MAX_LINE_LENGTH 512
 
 struct Line {
   unsigned long offset;
@@ -72,13 +73,18 @@ inline void print_line(State* state, unsigned long line_number, bool highlight =
   if (highlight) {
     XSetForeground(state->display, state->gc, state->highlight.pixel);
   }
-  unsigned int offset = state->source_buffer + state->lines[line_number].offset;
-  char line[MAX_LINE_LENGTH];
-  int length = snprintf(line, MAX_LINE_LENGTH,
-                        "0x%" DW_PR_XZEROS DW_PR_DUx  " : %s",)
-  we are here
-  put_string(state, line,
-             state->lines[line_number].length);
+  char* offset = state->source_buffer + state->lines[line_number].offset;
+  Dwarf_Addr address = state->lines[line_number].address;
+  //  if (address) {
+    char line[MAX_LINE_LENGTH];
+    snprintf(line, state->lines[line_number].length, "%s", offset);
+    char complete_line[MAX_LINE_LENGTH];
+    int total_length = snprintf(complete_line, MAX_LINE_LENGTH,
+                                "0x%" DW_PR_XZEROS DW_PR_DUx  " : %s", address, line);
+    put_string(state, complete_line, total_length);
+  // } else {
+  //   put_string(state, offset, state->lines[line_number].length);
+  // }
   if (highlight) {
     XSetForeground(state->display, state->gc, WhitePixel(state->display, state->screen));
   }
@@ -132,29 +138,18 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
         if (firstchar == '\r' && secondchar == '\n') {
           //TODO: \r\n handling is untested
           state->lines[line_number].address = 0;
-          state->lines[line_number].length = i - state->lines[line_number].offset - 2;
+          state->lines[line_number].length = i - state->lines[line_number].offset - 1;
           state->lines[line_number++].offset = ++i;
           continue;
         }
         if (firstchar == '\n') {
           state->lines[line_number].address = 0;
-          state->lines[line_number].length = i - state->lines[line_number].offset - 1;
+          state->lines[line_number].length = i - state->lines[line_number].offset;
           state->lines[++line_number].offset = i;
         }
       }
       state->lines[line_number].address = 0;
       state->lines[line_number].length = length - state->lines[line_number].offset;
-      print_line(state, 0);
-      print_line(state, 1);
-      print_line(state, 2);
-      print_line(state, 3);
-      print_line(state, 4);
-      print_line(state, 5);
-      print_line(state, 6, true);
-      print_line(state, 7);
-      print_line(state, 8);
-      print_line(state, 9);
-      print_line(state, 10);
     }
 
     state->result = dwarf_lineaddr(line, &line_addr, &state->err);
@@ -163,15 +158,21 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
     state->result = dwarf_lineno(line, &dwarf_line_number, &state->err);
     print_error(state, "dwarf_lineno");
 
-    if (state->lines[dwarf_line_number].address == 0) {
-      state->lines[dwarf_line_number].address = line_addr;
+    if (state->lines[dwarf_line_number - 1].address == 0) {
+      state->lines[dwarf_line_number - 1].address = line_addr;
     }
 
-    char line_info[MAX_ERR_MSG_LEN];
-    int info_size = snprintf(line_info, MAX_ERR_MSG_LEN,  "0x%" DW_PR_XZEROS DW_PR_DUx " [%4" DW_PR_DUu "]", line_addr, line_number);
-    put_string(state, line_info, info_size);
+    // char line_info[MAX_ERR_MSG_LEN];
+    // int info_size = snprintf(line_info, MAX_ERR_MSG_LEN,  "0x%" DW_PR_XZEROS DW_PR_DUx " [%4" DW_PR_DUu "]",
+    //                          line_addr, dwarf_line_number);
+    // put_string(state, line_info, info_size);
 
   }
+
+  for (unsigned long i = 0; i < line_count; ++i) {
+    print_line(state, i, i==8);
+  }
+
 
   dwarf_srclines_dealloc(state->dbg, line_buffer, line_count);
 }
@@ -282,10 +283,9 @@ printf("Got line info for %lli lines\n", linecount);
 
   char buffer[100];
   int length = snprintf(buffer, 100, "Executed: %d instructions", icounter);
-  XDrawString(state->display, state->window, state->gc, 300, 300, buffer, length);
-
+  put_string(state, buffer, length);
   XFlush(state->display);
-  sleep(10);
+  sleep(100);
   XCloseDisplay(state->display);
   init_result = dwarf_finish(state->dbg, &dwarf_error);
   if (init_result != DW_DLV_OK) {
