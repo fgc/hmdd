@@ -19,6 +19,7 @@ struct Line {
   unsigned long offset;
   unsigned long length;
   Dwarf_Addr address;
+  XCharStruct extents;
 };
 
 
@@ -32,10 +33,13 @@ Display* display;
   char* program_name;
   char* source_buffer;
   Line* lines;
+  unsigned long line_count;
   int at_y;
   Dwarf_Debug dbg;
   Dwarf_Error err;
   int result;
+  int mouse_x;
+  int mouse_y;
 };
 
 
@@ -69,32 +73,61 @@ void print_error(State* state, const char * msg, bool print_ok = false) {
 }
 
 
-inline void print_line(State* state, unsigned long line_number, bool highlight = false) {
+inline void print_line(State* state, unsigned long line_number) {
+
+  Line line = state->lines[line_number];
+  char* offset = state->source_buffer + line.offset;
+  Dwarf_Addr address = line.address;
+
+  char line_str[MAX_LINE_LENGTH];
+  snprintf(line_str, line.length, "%s", offset);
+  char complete_line[MAX_LINE_LENGTH];
+  int total_length = snprintf(complete_line, MAX_LINE_LENGTH,
+                                "0x%" DW_PR_XZEROS DW_PR_DUx  " : %s", address, line_str);
+
+  int direction, font_ascent, font_descent;
+  XTextExtents(state->font_info
+               , complete_line, total_length
+               , &direction
+               , &font_ascent, &font_descent
+               , &line.extents);
+
+  
+
+  int min_x = 10;
+  int max_x = 10 + line.extents.width;
+  int min_y = state->at_y - line.extents.ascent;
+  int max_y = state->at_y + line.extents.descent;
+
+  bool highlight = (state->mouse_x > min_x 
+		    && state->mouse_x < max_x
+		    && state->mouse_y > min_y
+		    && state->mouse_y < max_y);
+  
+#if 0
+  printf("Line: %lu, extents: %d %d %d %d %d\n", line_number
+	 , line.extents.lbearing
+	 , line.extents.rbearing
+	 , line.extents.width
+	 , line.extents.ascent
+	 , line.extents.descent
+	 );
+#endif
   if (highlight) {
     XSetForeground(state->display, state->gc, state->highlight.pixel);
   }
-  char* offset = state->source_buffer + state->lines[line_number].offset;
-  Dwarf_Addr address = state->lines[line_number].address;
-  //  if (address) {
-    char line[MAX_LINE_LENGTH];
-    snprintf(line, state->lines[line_number].length, "%s", offset);
-    char complete_line[MAX_LINE_LENGTH];
-    int total_length = snprintf(complete_line, MAX_LINE_LENGTH,
-                                "0x%" DW_PR_XZEROS DW_PR_DUx  " : %s", address, line);
-    put_string(state, complete_line, total_length);
-  // } else {
-  //   put_string(state, offset, state->lines[line_number].length);
-  // }
+  put_string(state, complete_line, total_length);
   if (highlight) {
     XSetForeground(state->display, state->gc, WhitePixel(state->display, state->screen));
   }
 }
 
 void print_line_info(State* state, Dwarf_Die cu_die) {
+#if 0
   char header[] = ".debug_line: line number info for a single cu";
   put_string(state, header, sizeof(header) - 1);
   put_string(state, "Hello2", 6);
-
+#endif
   Dwarf_Line* line_buffer;
   Dwarf_Signed line_count;
   Dwarf_Addr line_addr;
@@ -106,10 +139,14 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
   } else if (state->result == DW_DLV_NO_ENTRY) {
     printf("\nNOOOOOOOOO\n");
   }
+
+
+#if 0
+  // TODO: separate output from code
   char lines_sg[MAX_ERR_MSG_LEN];
   int msg_size = snprintf(lines_sg, MAX_ERR_MSG_LEN, "Got line info for %lli lines", line_count);
   put_string(state, lines_sg, msg_size);
-
+#endif
   char* filename = 0;
 
   for (Dwarf_Signed i = 0;
@@ -150,6 +187,7 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
       }
       state->lines[line_number].address = 0;
       state->lines[line_number].length = length - state->lines[line_number].offset;
+      state->line_count = line_number + 1;
     }
 
     state->result = dwarf_lineaddr(line, &line_addr, &state->err);
@@ -161,18 +199,13 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
     if (state->lines[dwarf_line_number - 1].address == 0) {
       state->lines[dwarf_line_number - 1].address = line_addr;
     }
-
-    // char line_info[MAX_ERR_MSG_LEN];
-    // int info_size = snprintf(line_info, MAX_ERR_MSG_LEN,  "0x%" DW_PR_XZEROS DW_PR_DUx " [%4" DW_PR_DUu "]",
-    //                          line_addr, dwarf_line_number);
-    // put_string(state, line_info, info_size);
-
+#if 0
+    char line_info[MAX_ERR_MSG_LEN];
+    int info_size = snprintf(line_info, MAX_ERR_MSG_LEN,  "0x%" DW_PR_XZEROS DW_PR_DUx " [%4" DW_PR_DUu "]",
+                             line_addr, dwarf_line_number);
+    put_string(state, line_info, info_size);
+#endif
   }
-
-  for (unsigned long i = 0; i < line_count; ++i) {
-    print_line(state, i, i==8);
-  }
-
 
   dwarf_srclines_dealloc(state->dbg, line_buffer, line_count);
 }
@@ -221,49 +254,24 @@ void run_debugger(State* state, pid_t pid) {
   dwarf_tag(die, &tag, &dwarf_error);
   printf("CU Die: name (%s), tag (%d)\n", name, tag);
   print_line_info(state, die);
-#if 0
-  Dwarf_Line* linebuf;
-  Dwarf_Signed linecount;
-  result = dwarf_srclines(die, &linebuf, &linecount, &dwarf_error);
-printf("Got line info for %lli lines\n", linecount);
 
-
-  for (Dwarf_Signed i = 0;
-       i < linecount;
-       ++i) {
-    Dwarf_Line* line = linebuf + i * sizeof(Dwarf_Line);
-    Dwarf_Bool has_addr = 0;
-    dwarf_line_is_addr_set(*line, &has_addr, &dwarf_error);
-    if (has_addr) {
-      Dwarf_Addr addr = 0;
-      dwarf_lineaddr(*line, &addr, &dwarf_error);
-      printf("(%lli) -> 0x%llx\n", i, addr);
+  XEvent an_event;
+  while (1) {
+    XNextEvent(state->display, &an_event);
+    switch (an_event.type) {
+    case MotionNotify:
+      state->mouse_x = an_event.xmotion.x;
+      state->mouse_y = an_event.xmotion.y;
+      break;
+    default:
+      printf("Event\n");
+      break;
+    }
+    state->at_y = 15;
+    for (unsigned long i = 0; i < state->line_count; ++i) {
+      print_line(state, i);
     }
   }
-
-  dwarf_srclines_dealloc(state->dbg, linebuf, linecount);
-
-  Dwarf_Attribute line_info_ref = 0;
-
-  result = dwarf_attr(die, DW_AT_stmt_list, &line_info_ref, &dwarf_error);
-
-  if (result != DW_DLV_OK) {
-    printf("Error: No line info attr\n");
-  } else {
-    Dwarf_Off offset = 0;
-    dwarf_global_formref(line_info_ref, &offset, &dwarf_error);
-    printf("Got the attr: %llu\n", offset);
-  }
-
-  Dwarf_Addr line_info_addr = 0;
-  Dwarf_Unsigned line_info_size = 0;
-  result = dwarf_get_section_info_by_name(state->dbg, ".debug_line", &line_info_addr, &line_info_size, &dwarf_error);
-  if (result != DW_DLV_OK) {
-    printf("Error: No line section info\n");
-  } else {
-    printf("Line section found: %llu (%llu)\n", line_info_addr, line_info_size);
-  }
-#endif
 
   int wait_status;
 
@@ -336,7 +344,11 @@ int main (int argc, char** argv) {
                                      , BlackPixel(state.display, state.screen)
                                      );
 
-  XSelectInput(state.display, state.window, StructureNotifyMask);
+  XSelectInput(state.display, state.window
+               , StructureNotifyMask
+               | ButtonPressMask
+               | ButtonReleaseMask
+               | PointerMotionMask);
 
   XMapWindow(state.display, state.window);
 
