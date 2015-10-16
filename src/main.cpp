@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h> //for strlen
 #include <sys/types.h> /* For open() */
 #include <sys/stat.h>  /* open, stat */
 #include <fcntl.h>     /* For open() */
@@ -14,6 +15,15 @@
 
 #define MAX_ERR_MSG_LEN 255
 #define MAX_LINE_LENGTH 512
+//TODO: better ID
+#define GEN_ID __LINE__
+
+struct Rectangle {
+  int x;
+  int y;
+  int w;
+  int h;
+};
 
 struct Line {
   unsigned long offset;
@@ -22,31 +32,85 @@ struct Line {
   XCharStruct extents;
 };
 
+struct UIState {
+  int mouse_x;
+  int mouse_y;
+  int mouse_down;
+
+  int hot_item;
+  int active_item;
+};
 
 struct State {
-Display* display;
+  Display* display;
   int screen;
   Window window;
   GC gc;
   XFontStruct* font_info;
-  XColor highlight;
+  XColor hot_color;
+  XColor active_color;
   char* program_name;
   char* source_buffer;
   Line* lines;
   unsigned long line_count;
-  int at_y;
+  int code_at_y;
+  int console_at_y;
   Dwarf_Debug dbg;
   Dwarf_Error err;
   int result;
-  int mouse_x;
-  int mouse_y;
+  UIState ui_state;
 };
 
+inline bool in_rectangle(int x, int y, Rectangle rect) {
+  bool result = (x > rect.x 
+		 && y > rect.y 
+		 && x < (rect.x + rect.w)
+		 && y < (rect.y + rect.h));
+  return(result);
+}
 
+bool button(State* state, int id, int x, int y, const char* label) {
+  int direction, font_ascent, font_descent;
+  XCharStruct extents;
+  int length = strlen(label);
+  XTextExtents(state->font_info
+               , label, length
+               , &font_ascent, &font_descent, &direction
+               , &extents);
+  Rectangle rect = {x, y, extents.width + 20, font_ascent + font_descent + 20};
 
-void put_string(State* state, const char* buffer, int length) {
-  XDrawString(state->display, state->window, state->gc, 10, state->at_y, buffer, length);
-  state->at_y += 15;
+  bool just_released = false;
+  if (in_rectangle(state->ui_state.mouse_x, state->ui_state.mouse_y, rect)) {
+    state->ui_state.hot_item = id;
+    if(state->ui_state.mouse_down) {
+      state->ui_state.active_item = id;
+    } else if(state->ui_state.active_item == id) {
+      just_released = true;
+    }
+  } else if(state->ui_state.active_item == id && !state->ui_state.mouse_down) {
+      state->ui_state.active_item = 0;
+  }
+
+  if(state->ui_state.active_item == id) {
+    XSetForeground(state->display, state->gc, state->active_color.pixel);
+  } else if(state->ui_state.hot_item == id) {
+    XSetForeground(state->display, state->gc, state->hot_color.pixel);
+  }
+
+  XDrawRectangle(state->display, state->window, state->gc
+		 , rect.x, rect.y, rect.w, rect.h);
+		 
+  XDrawString(state->display, state->window, state->gc
+	      , x + 10, y + 20 + font_ascent
+	      , label, length);
+  XSetForeground(state->display, state->gc, WhitePixel(state->display, state->screen));
+  XFlush(state->display);
+  return(just_released);
+}
+
+void console_log(State* state, const char* buffer, int length) {
+  XDrawString(state->display, state->window, state->gc, 500, state->console_at_y, buffer, length);
+  state->console_at_y += 15;
   XFlush(state->display);
 }
 
@@ -69,7 +133,7 @@ void print_error(State* state, const char * msg, bool print_ok = false) {
     msg_len = snprintf(buffer, MAX_ERR_MSG_LEN, "%s InternalError:  %s: code %d",
                        state->program_name, msg, state->result);
   }
-  put_string(state, buffer, msg_len);
+  console_log(state, buffer, msg_len);
 }
 
 
@@ -96,13 +160,13 @@ inline void print_line(State* state, unsigned long line_number) {
 
   int min_x = 10;
   int max_x = 10 + line.extents.width;
-  int min_y = state->at_y - line.extents.ascent;
-  int max_y = state->at_y + line.extents.descent;
+  int min_y = state->code_at_y - line.extents.ascent;
+  int max_y = state->code_at_y + line.extents.descent;
 
-  bool highlight = (state->mouse_x > min_x 
-		    && state->mouse_x < max_x
-		    && state->mouse_y > min_y
-		    && state->mouse_y < max_y);
+  bool highlight = (state->ui_state.mouse_x > min_x 
+		    && state->ui_state.mouse_x < max_x
+		    && state->ui_state.mouse_y > min_y
+		    && state->ui_state.mouse_y < max_y);
   
 #if 0
   printf("Line: %lu, extents: %d %d %d %d %d\n", line_number
@@ -114,9 +178,12 @@ inline void print_line(State* state, unsigned long line_number) {
 	 );
 #endif
   if (highlight) {
-    XSetForeground(state->display, state->gc, state->highlight.pixel);
+    XSetForeground(state->display, state->gc, state->hot_color.pixel);
   }
-  put_string(state, complete_line, total_length);
+  XDrawString(state->display, state->window, state->gc, 10, state->code_at_y, 
+	      complete_line, total_length);
+  state->code_at_y += 15;
+  XFlush(state->display);
   if (highlight) {
     XSetForeground(state->display, state->gc, WhitePixel(state->display, state->screen));
   }
@@ -125,8 +192,8 @@ inline void print_line(State* state, unsigned long line_number) {
 void print_line_info(State* state, Dwarf_Die cu_die) {
 #if 0
   char header[] = ".debug_line: line number info for a single cu";
-  put_string(state, header, sizeof(header) - 1);
-  put_string(state, "Hello2", 6);
+  console_log(state, header, sizeof(header) - 1);
+  console_log(state, "Hello2", 6);
 #endif
   Dwarf_Line* line_buffer;
   Dwarf_Signed line_count;
@@ -141,12 +208,10 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
   }
 
 
-#if 0
-  // TODO: separate output from code
   char lines_sg[MAX_ERR_MSG_LEN];
   int msg_size = snprintf(lines_sg, MAX_ERR_MSG_LEN, "Got line info for %lli lines", line_count);
-  put_string(state, lines_sg, msg_size);
-#endif
+  console_log(state, lines_sg, msg_size);
+
   char* filename = 0;
 
   for (Dwarf_Signed i = 0;
@@ -199,12 +264,12 @@ void print_line_info(State* state, Dwarf_Die cu_die) {
     if (state->lines[dwarf_line_number - 1].address == 0) {
       state->lines[dwarf_line_number - 1].address = line_addr;
     }
-#if 0
+
     char line_info[MAX_ERR_MSG_LEN];
     int info_size = snprintf(line_info, MAX_ERR_MSG_LEN,  "0x%" DW_PR_XZEROS DW_PR_DUx " [%4" DW_PR_DUu "]",
                              line_addr, dwarf_line_number);
-    put_string(state, line_info, info_size);
-#endif
+    console_log(state, line_info, info_size);
+
   }
 
   dwarf_srclines_dealloc(state->dbg, line_buffer, line_count);
@@ -260,17 +325,29 @@ void run_debugger(State* state, pid_t pid) {
     XNextEvent(state->display, &an_event);
     switch (an_event.type) {
     case MotionNotify:
-      state->mouse_x = an_event.xmotion.x;
-      state->mouse_y = an_event.xmotion.y;
+      state->ui_state.mouse_x = an_event.xmotion.x;
+      state->ui_state.mouse_y = an_event.xmotion.y;
+      break;
+    case ButtonPress:
+      state->ui_state.mouse_down = true;
+      break;
+    case ButtonRelease:
+      state->ui_state.mouse_down = false;
       break;
     default:
       printf("Event\n");
       break;
     }
-    state->at_y = 15;
+    state->code_at_y = 15;
     for (unsigned long i = 0; i < state->line_count; ++i) {
       print_line(state, i);
     }
+    
+    if (button(state, GEN_ID, 350, 0, "Quit")) {
+      exit(0);
+    }
+    
+    state->ui_state.hot_item = 0;
   }
 
   int wait_status;
@@ -291,7 +368,7 @@ void run_debugger(State* state, pid_t pid) {
 
   char buffer[100];
   int length = snprintf(buffer, 100, "Executed: %d instructions", icounter);
-  put_string(state, buffer, length);
+  console_log(state, buffer, length);
   XFlush(state->display);
   sleep(100);
   XCloseDisplay(state->display);
@@ -316,7 +393,8 @@ int main (int argc, char** argv) {
 
   State state = {};
 
-  state.at_y = 15;
+  state.code_at_y = 15;
+  state.console_at_y = 15;
 
   if (argc < 2) {
     fprintf(stderr, "Missing program name to debug\n");
@@ -371,8 +449,11 @@ int main (int argc, char** argv) {
 
   Colormap colormap = DefaultColormap(state.display, 0);
   const char* yellow="#FFFF00";
-  XParseColor(state.display, colormap, yellow, &state.highlight);
-  XAllocColor(state.display, colormap, &state.highlight);
+  XParseColor(state.display, colormap, yellow, &state.hot_color);
+  XAllocColor(state.display, colormap, &state.hot_color);
+  const char* green="#00FF00";
+  XParseColor(state.display, colormap, green, &state.active_color);
+  XAllocColor(state.display, colormap, &state.active_color);
 
   XSetForeground(state.display, state.gc, WhitePixel(state.display, state.screen));
 
