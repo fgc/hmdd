@@ -1,11 +1,11 @@
 #include <stdio.h>
-#include <string.h> //for strlen
+#include <string.h>    //strlen
 #include <sys/types.h> /* For open() */
 #include <sys/stat.h>  /* open, stat */
 #include <fcntl.h>     /* For open() */
-#include <stdlib.h>     /* For exit() */
+#include <stdlib.h>    /* For exit() */
 #include <assert.h>
-#include <unistd.h> //sleep, close
+#include <unistd.h>    //sleep, close
 #include <X11/Xlib.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
@@ -189,7 +189,7 @@ inline void print_line(State* state, unsigned long line_number) {
   }
 }
 
-void print_line_info(State* state, Dwarf_Die cu_die) {
+void get_line_info(State* state, Dwarf_Die cu_die) {
 #if 0
   char header[] = ".debug_line: line number info for a single cu";
   console_log(state, header, sizeof(header) - 1);
@@ -318,7 +318,7 @@ void run_debugger(State* state, pid_t pid) {
   Dwarf_Half tag = 0;
   dwarf_tag(die, &tag, &dwarf_error);
   printf("CU Die: name (%s), tag (%d)\n", name, tag);
-  print_line_info(state, die);
+  get_line_info(state, die);
 
   XEvent an_event;
   while (1) {
@@ -344,12 +344,13 @@ void run_debugger(State* state, pid_t pid) {
     }
     
     if (button(state, GEN_ID, 350, 0, "Quit")) {
-      exit(0);
+      break;
     }
     
     state->ui_state.hot_item = 0;
   }
 
+#if 0
   int wait_status;
 
   wait(&wait_status);
@@ -371,6 +372,8 @@ void run_debugger(State* state, pid_t pid) {
   console_log(state, buffer, length);
   XFlush(state->display);
   sleep(100);
+#endif
+
   XCloseDisplay(state->display);
   init_result = dwarf_finish(state->dbg, &dwarf_error);
   if (init_result != DW_DLV_OK) {
