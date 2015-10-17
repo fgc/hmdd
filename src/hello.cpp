@@ -5,6 +5,7 @@ int main(int argc, char** argv) {
   int another_number = 1;
   int yet_another = 2;
   number = another_number + yet_another;
-  printf("Hello debugger: %d\n", number);
+  printf("Hello debugger: %d ...\n", number);
+  printf("...and goodbye\n");
   return(0);
 }

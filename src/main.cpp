@@ -9,6 +9,7 @@
 #include <X11/Xlib.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
+#include <sys/user.h>
 #include <dwarf.h>
 #include <libdwarf.h>
 
@@ -17,6 +18,11 @@
 #define MAX_LINE_LENGTH 512
 //TODO: better ID
 #define GEN_ID __LINE__
+
+struct Breakpoint {
+  unsigned long line_number;
+  unsigned int original_data;
+};
 
 struct Rectangle {
   int x;
@@ -46,6 +52,7 @@ struct State {
   int screen;
   Window window;
   GC gc;
+  pid_t pid;
   XFontStruct* font_info;
   XColor hot_color;
   XColor active_color;
@@ -69,6 +76,25 @@ inline bool in_rectangle(int x, int y, Rectangle rect) {
   return(result);
 }
 
+inline bool is_hot(State* state, int id) {
+  bool result = state->ui_state.hot_item == id;
+  return(result);
+}
+
+inline bool is_active(State* state, int id) {
+  bool result = state->ui_state.active_item == id;
+  return(result);
+}
+
+inline void std_check_hot_and_active(State* state, Rectangle rect, int id) {
+  if (in_rectangle(state->ui_state.mouse_x, state->ui_state.mouse_y, rect)) {
+    state->ui_state.hot_item = id;
+    if(state->ui_state.mouse_down) {
+      state->ui_state.active_item = id;
+    }
+  }
+}
+
 bool button(State* state, int id, int x, int y, const char* label) {
   int direction, font_ascent, font_descent;
   XCharStruct extents;
@@ -79,21 +105,9 @@ bool button(State* state, int id, int x, int y, const char* label) {
                , &extents);
   Rectangle rect = {x, y, extents.width + 20, font_ascent + font_descent + 20};
 
-  bool just_released = false;
-  if (in_rectangle(state->ui_state.mouse_x, state->ui_state.mouse_y, rect)) {
-    state->ui_state.hot_item = id;
-    if(state->ui_state.mouse_down) {
-      state->ui_state.active_item = id;
-    } else if(state->ui_state.active_item == id) {
-      just_released = true;
-    }
-  } else if(state->ui_state.active_item == id && !state->ui_state.mouse_down) {
-      state->ui_state.active_item = 0;
-  }
+  std_check_hot_and_active(state, rect, id);
 
-  if(state->ui_state.active_item == id) {
-    XSetForeground(state->display, state->gc, state->active_color.pixel);
-  } else if(state->ui_state.hot_item == id) {
+  if(is_hot(state, id)) {
     XSetForeground(state->display, state->gc, state->hot_color.pixel);
   }
 
@@ -105,7 +119,7 @@ bool button(State* state, int id, int x, int y, const char* label) {
 	      , label, length);
   XSetForeground(state->display, state->gc, WhitePixel(state->display, state->screen));
   XFlush(state->display);
-  return(just_released);
+  return(is_active(state, id));
 }
 
 void console_log(State* state, const char* buffer, int length) {
@@ -137,7 +151,7 @@ void print_error(State* state, const char * msg, bool print_ok = false) {
 }
 
 
-inline void print_line(State* state, unsigned long line_number) {
+bool source_line(int id, State* state, unsigned long line_number) {
 
   Line line = state->lines[line_number];
   char* offset = state->source_buffer + line.offset;
@@ -147,7 +161,7 @@ inline void print_line(State* state, unsigned long line_number) {
   snprintf(line_str, line.length, "%s", offset);
   char complete_line[MAX_LINE_LENGTH];
   int total_length = snprintf(complete_line, MAX_LINE_LENGTH,
-                                "0x%" DW_PR_XZEROS DW_PR_DUx  " : %s", address, line_str);
+                                "0x%08llx : %s", address, line_str);
 
   int direction, font_ascent, font_descent;
   XTextExtents(state->font_info
@@ -157,36 +171,22 @@ inline void print_line(State* state, unsigned long line_number) {
                , &line.extents);
 
   
-
-  int min_x = 10;
-  int max_x = 10 + line.extents.width;
-  int min_y = state->code_at_y - line.extents.ascent;
-  int max_y = state->code_at_y + line.extents.descent;
-
-  bool highlight = (state->ui_state.mouse_x > min_x 
-		    && state->ui_state.mouse_x < max_x
-		    && state->ui_state.mouse_y > min_y
-		    && state->ui_state.mouse_y < max_y);
+  Rectangle rect = {10, state->code_at_y - line.extents.ascent, line.extents.width, line.extents.ascent + line.extents.descent};
   
-#if 0
-  printf("Line: %lu, extents: %d %d %d %d %d\n", line_number
-	 , line.extents.lbearing
-	 , line.extents.rbearing
-	 , line.extents.width
-	 , line.extents.ascent
-	 , line.extents.descent
-	 );
-#endif
-  if (highlight) {
+  std_check_hot_and_active(state, rect, id);
+
+  if (is_hot(state,id)) {
     XSetForeground(state->display, state->gc, state->hot_color.pixel);
   }
   XDrawString(state->display, state->window, state->gc, 10, state->code_at_y, 
 	      complete_line, total_length);
   state->code_at_y += 15;
   XFlush(state->display);
-  if (highlight) {
+  if (is_hot(state,id)) {
     XSetForeground(state->display, state->gc, WhitePixel(state->display, state->screen));
   }
+
+  return is_active(state, id); 
 }
 
 void get_line_info(State* state, Dwarf_Die cu_die) {
@@ -275,7 +275,7 @@ void get_line_info(State* state, Dwarf_Die cu_die) {
   dwarf_srclines_dealloc(state->dbg, line_buffer, line_count);
 }
 
-void run_debugger(State* state, pid_t pid) {
+void run_debugger(State* state) {
 
   int handle = open(state->program_name, O_RDONLY);
   if (handle < 0) {
@@ -340,14 +340,36 @@ void run_debugger(State* state, pid_t pid) {
     }
     state->code_at_y = 15;
     for (unsigned long i = 0; i < state->line_count; ++i) {
-      print_line(state, i);
+      if (source_line(10000 + i, state, i)) {
+        char buffer[100];
+        int length = snprintf(buffer, 100, "Setting breakpoint at line: %lu", i);
+        console_log(state, buffer, length);
+        Dwarf_Addr address = state->lines[i].address;
+        unsigned int data = ptrace(PTRACE_PEEKTEXT, state->pid, (void *) address, 0);
+        length = snprintf(buffer, 100, "Original data at 0x%08llx: 0x%08ux", address, data);
+        console_log(state, buffer, length);
+        unsigned int trapped_data = (data & 0xFFFFFF00) | 0xCC;
+        ptrace(PTRACE_POKETEXT, state->pid, (void *) address, (void *)trapped_data); 
+      }
     }
     
     if (button(state, GEN_ID, 350, 0, "Quit")) {
       break;
     }
     
+    if (button(state, GEN_ID, 350, 40, "Run")) {
+      ptrace(PTRACE_CONT, state->pid, 0, 0);
+      int wait_status;
+      wait(&wait_status);
+      user_regs_struct regs;
+      ptrace(PTRACE_GETREGS, state->pid, 0, &regs);
+      char buffer[100];
+      int length = snprintf(buffer, 100, "Child stopped at EIP = 0x%08lx\n", regs.eip);
+      console_log(state, buffer, length);
+    }
+
     state->ui_state.hot_item = 0;
+    state->ui_state.active_item = 0;
   }
 
 #if 0
@@ -358,7 +380,7 @@ void run_debugger(State* state, pid_t pid) {
   unsigned int icounter = 0;
   while(WIFSTOPPED(wait_status)) {
     ++icounter;
-    if(ptrace(PTRACE_SINGLESTEP, pid, 0, 0) < 0) {
+    if(ptrace(PTRACE_SINGLESTEP, state->pid, 0, 0) < 0) {
       fprintf(stderr, "Error: ptrace step\n");
       return;
     }
@@ -472,7 +494,8 @@ int main (int argc, char** argv) {
   if (pid == 0) {
     run_debug_target(argv[1]);
   } else if (pid > 0) {
-    run_debugger(&state, pid);
+    state.pid = pid;
+    run_debugger(&state);
   } else {
     fprintf(stderr, "Error: fork\n");
     return -1;
